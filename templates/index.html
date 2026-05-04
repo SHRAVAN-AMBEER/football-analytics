@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TacticalIQ — Real-Time Match Engine</title>
+  <meta name="description" content="Live football tactical analysis powered by Spark Structured Streaming and GraphX">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='90'>⚽</text></svg>">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+  <style>
+    :root {
+      --pitch-dark: #0f2318;
+      --pitch-mid:  #163020;
+      --pitch-line: rgba(255,255,255,0.35);
+      --bg:         #080c10;
+      --panel:      rgba(12,18,28,0.92);
+      --border:     rgba(255,255,255,0.07);
+      --home:       #3b82f6;
+      --away:       #ef4444;
+      --accent:     #00e5a0;
+      --gold:       #f59e0b;
+      --text:       #e2e8f0;
+      --muted:      #64748b;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── TOP BAR ── */
+    #topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      height: 56px;
+      background: rgba(8,12,16,0.98);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      z-index: 100;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-icon { font-size: 1.5rem; }
+    .brand-name { font-size: 1.15rem; font-weight: 900; letter-spacing: 1px; color: #fff; }
+    .brand-sub  { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; margin-top: 1px; }
+
+    .top-center { display: flex; gap: 32px; align-items: center; }
+    .stat-chip {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 4px 16px; border-radius: 8px;
+      background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+    }
+    .stat-chip-val  { font-size: 1rem; font-weight: 700; color: #fff; }
+    .stat-chip-label{ font-size: 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+    .stat-chip.home .stat-chip-val { color: var(--home); }
+    .stat-chip.away .stat-chip-val { color: var(--away); }
+    .stat-chip.time .stat-chip-val { color: var(--accent); }
+
+    .live-pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 20px;
+      background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3);
+      font-size: 0.75rem; font-weight: 700; color: var(--away); letter-spacing: 1px;
+    }
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--away);
+      animation: blink 1.2s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    /* ── MAIN LAYOUT ── */
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      gap: 0;
+    }
+
+    /* ── LEFT SIDEBAR ── */
+    #left-panel {
+      width: 260px;
+      flex-shrink: 0;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 16px;
+      gap: 16px;
+    }
+
+    /* ── CENTER PITCH ── */
+    #pitch-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse at center, #0e1e14 0%, #080c10 100%);
+      padding: 16px;
+      position: relative;
+    }
+    canvas {
+      border-radius: 10px;
+      box-shadow: 0 0 60px rgba(0,229,160,0.08), 0 20px 60px rgba(0,0,0,0.7);
+      max-width: 100%;
+      max-height: 100%;
+    }
+
+    /* ── RIGHT SIDEBAR ── */
+    #right-panel {
+      width: 280px;
+      flex-shrink: 0;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 16px;
+      gap: 16px;
+    }
+
+    /* ── PANEL CARDS ── */
+    .pcard {
+      background: rgba(255,255,255,0.025);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .pcard-title {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .pcard-title::after { content:''; flex:1; height:1px; background:var(--border); }
+
+    /* Player row */
+    .player-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      animation: slideIn 0.3s ease;
+    }
+    .player-row:last-child { border-bottom: none; }
+    @keyframes slideIn { from { opacity:0; transform:translateX(-8px); } }
+
+    /* Jersey badge — replaces the orange circle */
+    .jersey {
+      width: 28px; height: 28px;
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.7rem; font-weight: 800;
+      flex-shrink: 0;
+    }
+    .jersey.home { background: rgba(59,130,246,0.2); color: var(--home); border: 1px solid rgba(59,130,246,0.4); }
+    .jersey.away { background: rgba(239,68,68,0.2);  color: var(--away); border: 1px solid rgba(239,68,68,0.4); }
+    .jersey.gold { background: rgba(245,158,11,0.2); color: var(--gold); border: 1px solid rgba(245,158,11,0.4); }
+
+    .player-info { flex: 1; min-width: 0; }
+    .player-name { font-size: 0.82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar-track { width:100%; height:3px; background:rgba(255,255,255,0.06); border-radius:2px; margin-top:4px; overflow:hidden; }
+    .bar-fill  { height:100%; border-radius:2px; transition: width 0.6s ease; }
+    .bar-fill.accent { background: var(--accent); }
+    .bar-fill.gold   { background: var(--gold); }
+    .bar-fill.home   { background: var(--home); }
+
+    .metric-val { font-size: 0.78rem; font-weight: 700; white-space: nowrap; }
+    .val-accent { color: var(--accent); }
+    .val-gold   { color: var(--gold); }
+
+    /* Legend */
+    .legend {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      padding: 10px 0 0;
+      font-size: 0.75rem; color: var(--muted);
+    }
+    .legend-item { display:flex; align-items:center; gap:5px; }
+    .leg-dot { width:10px; height:10px; border-radius:3px; }
+    .leg-dot.home { background:var(--home); }
+    .leg-dot.away { background:var(--away); }
+    .leg-dot.ball { background:#fff; border-radius:50%; }
+
+    /* Possession bar */
+    #poss-bar-wrap { margin-top: 4px; }
+    .poss-bar {
+      display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px;
+    }
+    .poss-home { background: var(--home); transition: flex 1s ease; }
+    .poss-away { background: var(--away); transition: flex 1s ease; }
+    .poss-labels { display:flex; justify-content:space-between; margin-top:4px; font-size:0.7rem; }
+    .poss-labels span { font-weight:700; }
+    .poss-labels .ph { color:var(--home); }
+    .poss-labels .pa { color:var(--away); }
+
+    /* empty state */
+    .empty { color:var(--muted); font-size:0.8rem; text-align:center; padding:20px 0; font-style:italic; }
+
+    /* Spark badge bottom */
+    #spark-badge {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      background: rgba(8,12,16,0.85);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 1px;
+      display: flex; align-items:center; gap:6px;
+    }
+    #spark-badge span { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div class="brand">
+    <div class="brand-icon">⚽</div>
+    <div>
+      <div class="brand-name">TACTICAL IQ</div>
+      <div class="brand-sub">Spark Streaming · GraphX · Real-Time</div>
+    </div>
+  </div>
+
+  <div class="top-center">
+    <div class="stat-chip home">
+      <div class="stat-chip-val" id="home-poss">—</div>
+      <div class="stat-chip-label">Home Poss %</div>
+    </div>
+    <div class="stat-chip time">
+      <div class="stat-chip-val" id="match-time">LIVE</div>
+      <div class="stat-chip-label">Match Clock</div>
+    </div>
+    <div class="stat-chip away">
+      <div class="stat-chip-val" id="away-poss">—</div>
+      <div class="stat-chip-label">Away Poss %</div>
+    </div>
+  </div>
+
+  <div class="live-pill">
+    <div class="live-dot"></div>
+    LIVE TELEMETRY
+  </div>
+</div>
+
+<!-- MAIN -->
+<div id="main">
+
+  <!-- LEFT PANEL -->
+  <div id="left-panel">
+    <div class="pcard">
+      <div class="pcard-title">🔺 Stable Possession (Triangles)</div>
+      <div id="trianglesList"><div class="empty">Waiting for Spark GraphX…</div></div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-title">📊 Possession Share</div>
+      <div id="poss-bar-wrap">
+        <div class="poss-bar">
+          <div class="poss-home" id="poss-home-bar" style="flex:50"></div>
+          <div class="poss-away" id="poss-away-bar" style="flex:50"></div>
+        </div>
+        <div class="poss-labels">
+          <span class="ph" id="poss-home-pct">50%</span>
+          <span class="pa" id="poss-away-pct">50%</span>
+        </div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-title">🔵 Home Team On Pitch</div>
+      <div id="homeList"><div class="empty">Awaiting telemetry…</div></div>
+    </div>
+  </div>
+
+  <!-- CENTER PITCH -->
+  <div id="pitch-wrap">
+    <canvas id="pitchCanvas" width="900" height="584"></canvas>
+    <div id="spark-badge">Powered by <span>Spark Structured Streaming</span> · 5s micro-batches · GraphX PageRank</div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div id="right-panel">
+    <div class="pcard">
+      <div class="pcard-title">⭐ Playmaker Influence (PageRank)</div>
+      <div id="influenceList"><div class="empty">Waiting for Betweenness…</div></div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-title">🔴 Away Team On Pitch</div>
+      <div id="awayList"><div class="empty">Awaiting telemetry…</div></div>
+    </div>
+    <div class="pcard">
+      <div class="pcard-title">📡 Spark Streaming Info</div>
+      <div style="font-size:0.72rem; color:var(--muted); line-height:1.7;">
+        <div>Engine: <span style="color:var(--accent)">Spark 3.5 + GraphX</span></div>
+        <div>Source: <span style="color:var(--text)">Kafka → player_telemetry</span></div>
+        <div>State: <span style="color:var(--text)">flatMapGroupsWithState</span></div>
+        <div>Trigger: <span style="color:var(--text)">ProcessingTime 5s</span></div>
+        <div>Sink: <span style="color:var(--text)">foreachBatch → Kafka insights</span></div>
+        <div>Algorithms: <span style="color:var(--gold)">TriangleCount, PageRank</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+window.addEventListener('load', () => {
+  const socket = io();
+  const canvas = document.getElementById('pitchCanvas');
+  const ctx = canvas.getContext('2d');
+  const SCALE = canvas.width / 105;
+
+  let gameState = { players: [], ball: {x:52.5, y:34} };
+  let graphMetrics = { triangles: {}, influence: {} };
+  let passCount = { Home: 0, Away: 0 };
+  let startTime = Date.now();
+
+  // ── MATCH CLOCK ──
+  setInterval(() => {
+    const secs = Math.floor((Date.now() - startTime) / 1000);
+    const m = String(Math.floor(secs/60)).padStart(2,'0');
+    const s = String(secs % 60).padStart(2,'0');
+    document.getElementById('match-time').textContent = `${m}:${s}`;
+  }, 1000);
+
+  // ── DRAW PITCH ──
+  function drawPitch() {
+    const W = canvas.width, H = canvas.height;
+
+    // Grass base + stripes
+    ctx.fillStyle = '#0f2318';
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#163020';
+    for (let i=0; i<W; i+=SCALE*10) ctx.fillRect(i,0,SCALE*5,H);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 2;
+
+    const pad = 8;
+    // Outline
+    ctx.strokeRect(pad, pad, W-pad*2, H-pad*2);
+    // Halfway
+    ctx.beginPath(); ctx.moveTo(W/2,pad); ctx.lineTo(W/2,H-pad); ctx.stroke();
+    // Centre circle
+    ctx.beginPath(); ctx.arc(W/2,H/2,91.5/105*W/2,0,2*Math.PI); ctx.stroke();
+    // Centre spot
+    ctx.beginPath(); ctx.arc(W/2,H/2,3,0,2*Math.PI); ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fill();
+
+    // Penalty areas (left & right)
+    const penW = 16.5*SCALE, penH = 40.32*SCALE;
+    ctx.strokeRect(pad, H/2-penH/2, penW, penH);
+    ctx.strokeRect(W-pad-penW, H/2-penH/2, penW, penH);
+
+    // 6-yard boxes
+    const sixW = 5.5*SCALE, sixH = 18.32*SCALE;
+    ctx.strokeRect(pad, H/2-sixH/2, sixW, sixH);
+    ctx.strokeRect(W-pad-sixW, H/2-sixH/2, sixW, sixH);
+
+    // Goals
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    const gH = 7.32*SCALE, gD = 2.4;
+    ctx.fillRect(pad-gD, H/2-gH/2, gD, gH);
+    ctx.fillRect(W-pad, H/2-gH/2, gD, gH);
+  }
+
+  // ── DRAW PLAYERS ──
+  function drawPlayers() {
+    const W = canvas.width, H = canvas.height;
+    const padX = 8, padY = 8;
+    const usableW = W - padX*2, usableH = H - padY*2;
+
+    // Draw pass influence glow (subtle gradient aura replacing orange circle)
+    gameState.players.forEach(p => {
+      const px = padX + (p.x / 105) * usableW;
+      const py = padY + (p.y / 68)  * usableH;
+      const inf = graphMetrics.influence[p.id] || 0;
+
+      if (inf > 0.12) {
+        const radius = 14 + inf * 40;
+        const grd = ctx.createRadialGradient(px,py,2,px,py,radius);
+        const isHome = p.team === 'Home';
+        const col = isHome ? '59,130,246' : '239,68,68';
+        grd.addColorStop(0, `rgba(${col},${Math.min(inf*0.9,0.5)})`);
+        grd.addColorStop(1, `rgba(${col},0)`);
+        ctx.beginPath();
+        ctx.arc(px,py,radius,0,2*Math.PI);
+        ctx.fillStyle = grd;
+        ctx.fill();
+      }
+    });
+
+    // Draw players as sleek diamond/square tokens
+    gameState.players.forEach(p => {
+      const px = padX + (p.x / 105) * usableW;
+      const py = padY + (p.y / 68)  * usableH;
+      const isHome = p.team === 'Home';
+      const col = isHome ? '#3b82f6' : '#ef4444';
+      const jersey = p.id.split('_')[1] || '?';
+
+      // Shadow
+      ctx.shadowColor = col;
+      ctx.shadowBlur = 8;
+
+      // Rounded square token
+      const r = 7;
+      ctx.fillStyle = isHome ? 'rgba(30,60,120,0.95)' : 'rgba(120,30,30,0.95)';
+      roundRect(ctx, px-r, py-r, r*2, r*2, 3);
+      ctx.fill();
+
+      // Border
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, px-r, py-r, r*2, r*2, 3);
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+
+      // Jersey number
+      ctx.fillStyle = '#fff';
+      ctx.font = `bold ${r}px Outfit, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(jersey, px, py);
+    });
+
+    // Ball
+    const bx = padX + (gameState.ball.x / 105) * usableW;
+    const by = padY + (gameState.ball.y / 68)  * usableH;
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.arc(bx,by,5,0,2*Math.PI);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+    ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+    ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r);
+    ctx.closePath();
+  }
+
+  // ── RENDER LOOP ──
+  function render() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawPitch();
+    drawPlayers();
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+
+  // ── SOCKET HANDLERS ──
+  let lastUIUpdate = 0;
+  socket.on('telemetry_update', data => {
+    gameState = data;
+    
+    // Update possession frames based on engine signal
+    if (graphMetrics.possessionTeam === 'Home') passCount.Home++;
+    else if (graphMetrics.possessionTeam === 'Away') passCount.Away++;
+
+    // Throttle DOM updates to ~2 FPS to prevent flickering
+    const now = Date.now();
+    if (now - lastUIUpdate > 500) {
+      updateTeamLists();
+      updatePossession();
+      lastUIUpdate = now;
+    }
+  });
+
+  socket.on('insights_update', data => {
+    if (data.type === 'graph_metrics') {
+      graphMetrics = data;
+      updateMetricsPanels();
+    }
+  });
+
+  // ── TEAM LISTS ──
+  function updateTeamLists() {
+    const home = gameState.players.filter(p => p.team === 'Home');
+    const away = gameState.players.filter(p => p.team === 'Away');
+    
+    const homeHTML = home.map(p => {
+      const jersey = p.id.split('_')[1] || '?';
+      const speed = p.vel || 0;
+      return `<div class="player-row">
+        <div class="jersey home">${jersey}</div>
+        <div class="player-info">
+          <div class="player-name">${p.id}</div>
+          <div class="bar-track"><div class="bar-fill home" style="width:${Math.min(speed*10, 100)}%"></div></div>
+        </div>
+        <span class="metric-val" style="color:var(--home)">${speed.toFixed(1)} m/s</span>
+      </div>`;
+    }).join('');
+
+    const awayHTML = away.map(p => {
+      const jersey = p.id.split('_')[1] || '?';
+      const speed = p.vel || 0;
+      return `<div class="player-row">
+        <div class="jersey away">${jersey}</div>
+        <div class="player-info">
+          <div class="player-name">${p.id}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${Math.min(speed*10, 100)}%; background:var(--away)"></div></div>
+        </div>
+        <span class="metric-val" style="color:var(--away)">${speed.toFixed(1)} m/s</span>
+      </div>`;
+    }).join('');
+
+    document.getElementById('homeList').innerHTML = homeHTML || '<div class="empty">No data</div>';
+    document.getElementById('awayList').innerHTML = awayHTML || '<div class="empty">No data</div>';
+  }
+
+  // ── POSSESSION ──
+  function updatePossession() {
+    const total = passCount.Home + passCount.Away || 1;
+    const hp = Math.round((passCount.Home / total) * 100);
+    const ap = 100 - hp;
+    
+    document.getElementById('poss-home-bar').style.flex = hp;
+    document.getElementById('poss-away-bar').style.flex = ap;
+    document.getElementById('poss-home-pct').textContent = hp + '%';
+    document.getElementById('poss-away-pct').textContent = ap + '%';
+    document.getElementById('home-poss').textContent = hp + '%';
+    document.getElementById('away-poss').textContent = ap + '%';
+  }
+
+  // ── GRAPH METRICS PANELS ──
+  function updateMetricsPanels() {
+    // Triangles
+    const tList = document.getElementById('trianglesList');
+    const tri = Object.entries(graphMetrics.triangles || {}).sort((a,b)=>b[1]-a[1]).slice(0,6);
+    
+    if (tri.length > 0) {
+      const max = Math.max(...tri.map(t=>t[1]), 1);
+      tList.innerHTML = tri.map(([pid, cnt]) => {
+        const jersey = pid.split('_')[1] || '?';
+        const teamClass = pid.startsWith('Home') ? 'home' : 'away';
+        return `<div class="player-row">
+          <div class="jersey ${teamClass}">${jersey}</div>
+          <div class="player-info">
+            <div class="player-name">${pid}</div>
+            <div class="bar-track"><div class="bar-fill accent" style="width:${(cnt/max)*100}%"></div></div>
+          </div>
+          <span class="metric-val val-accent">${cnt}</span>
+        </div>`;
+      }).join('');
+    } else {
+      tList.innerHTML = '<div class="empty">Building graph window...</div>';
+    }
+
+    // Influence
+    const iList = document.getElementById('influenceList');
+    const inf = Object.entries(graphMetrics.influence || {}).sort((a,b)=>b[1]-a[1]).slice(0,6);
+    
+    if (inf.length > 0) {
+      const max = Math.max(...inf.map(i=>i[1]), 0.001);
+      iList.innerHTML = inf.map(([pid, score], idx) => {
+        const jersey = pid.split('_')[1] || '?';
+        const teamClass = pid.startsWith('Home') ? 'home' : 'away';
+        const badge = idx === 0 ? 'gold' : teamClass;
+        return `<div class="player-row">
+          <div class="jersey ${badge}">${jersey}</div>
+          <div class="player-info">
+            <div class="player-name">${pid}</div>
+            <div class="bar-track"><div class="bar-fill gold" style="width:${(score/max)*100}%"></div></div>
+          </div>
+          <span class="metric-val val-gold">${score.toFixed(3)}</span>
+        </div>`;
+      }).join('');
+    } else {
+      iList.innerHTML = '<div class="empty">Calculating PageRank...</div>';
+    }
+  }
+});
+</script>
+</body>
+</html>
